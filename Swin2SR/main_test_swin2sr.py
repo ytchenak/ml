@@ -10,6 +10,7 @@ import requests
 from models.network_swin2sr import Swin2SR as net
 from utils import util_calculate_psnr_ssim as util
 from time import time
+from calflops import calculate_flops
 
 def main():
     parser = argparse.ArgumentParser()
@@ -44,7 +45,7 @@ def main():
 
     model = define_model(args)
     model.eval()
-    model = model.to(device)
+    model = model.to('cpu')
 
     # setup folder and path
     folder, save_dir, border, window_size = setup(args)
@@ -63,7 +64,7 @@ def main():
         # read image
         imgname, img_lq, img_gt = get_image_pair(args, path)  # image to HWC-BGR, float32
         img_lq = np.transpose(img_lq if img_lq.shape[2] == 1 else img_lq[:, :, [2, 1, 0]], (2, 0, 1))  # HCW-BGR to CHW-RGB
-        img_lq = torch.from_numpy(img_lq).float().unsqueeze(0).to(device)  # CHW-RGB to NCHW-RGB
+        img_lq = torch.from_numpy(img_lq).float().unsqueeze(0).to('cpu')  # CHW-RGB to NCHW-RGB
 
         # inference
         with torch.no_grad():
@@ -281,6 +282,12 @@ def get_image_pair(args, path):
 def test(img_lq, model, args, window_size):
     if args.tile is None:
         # test the image as a whole
+
+        flops, _, parms =  calculate_flops(model=model, 
+                                      input_shape=tuple(img_lq.shape),
+                                      output_as_string=True,
+                                      output_precision=4)
+
         output = model(img_lq)   
     else:
         # test the image tile by tile

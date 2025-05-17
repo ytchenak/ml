@@ -1,0 +1,54 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal", 
+            "justMyCode": false
+        },
+        {
+            "name": "run swinir torch inference test classical_sr x2", 
+            "type": "debugpy",
+            "request": "launch",
+            "program": "SwinIR/main_test_swinir.py",
+            "args": ["--task", "classical_sr", "--scale", "2", "--training_patch_size", "64", "--model_path", "SwinIR/model_zoo/001_classicalSR_DF2K_s64w8_SwinIR-M_x2.pth", "--folder_lq", "test_images/urban100x2", "--folder_gt", "test_images/urban100"],
+            "console": "integratedTerminal", 
+            "justMyCode": false
+        },
+        {
+            "name": "run swinir torch inference test real_sr x4", 
+            "type": "debugpy",
+            "request": "launch",
+            "program": "SwinIR/main_test_swinir.py",
+            "args": ["--task", "real_sr", "--scale", "4", "--model_path", "SwinIR/model_zoo/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_PSNR.pth", "--folder_lq", "test_images/urban100x4a", "--folder_gt", "test_images/urban100"],
+            "console": "integratedTerminal", 
+            "justMyCode": false
+        },
+        {
+            "name": "run swin2sr torch inference test classical_sr x2", 
+            "type": "debugpy",
+            "request": "launch",
+            "program": "Swin2SR/main_test_swin2sr.py",
+            "args": ["--task", "classical_sr", "--scale", "2", "--training_patch_size", "64", "--model_path", "Swin2SR/model_zoo/Swin2SR_ClassicalSR_X2_64.pth", "--folder_lq", "test_images/urban100x2", "--folder_gt", "test_images/urban100"],
+            "console": "integratedTerminal", 
+            "justMyCode": false
+        },
+        {
+            "name": "run swin2sr torch inference test real_sr x4", 
+            "type": "debugpy",
+            "request": "launch",
+            "program": "Swin2SR/main_test_swin2sr.py",
+            "args": ["--task", "real_sr", "--scale", "4", "--model_path", "Swin2SR/model_zoo/Swin2SR_RealworldSR_X4_64_BSRGAN_PSNR.pth", "--folder_lq", "test_images/urban100x4a", "--folder_gt", "test_images/urban100"],
+            "console": "integratedTerminal", 
+            "justMyCode": false
+        },
+        
+    ]
+}
