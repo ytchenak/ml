@@ -1,0 +1,5 @@
+.venv
+.vscode
+test_images
+gittemp
+*.pth
