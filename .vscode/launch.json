@@ -18,7 +18,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "SwinIR/main_test_swinir.py",
-            "args": ["--task", "classical_sr", "--scale", "2", "--training_patch_size", "64", "--model_path", "SwinIR/model_zoo/001_classicalSR_DF2K_s64w8_SwinIR-M_x2.pth", "--folder_lq", "test_images/urban100x2", "--folder_gt", "test_images/urban100"],
+            "args": ["--task", "classical_sr", "--scale", "2", "--training_patch_size", "64", "--model_path", "SwinIR/model_zoo/001_classicalSR_DF2K_s64w8_SwinIR-M_x2.pth", "--folder_lq", "test_images/urban100x2a", "--folder_gt", "test_images/urban100"],
             "console": "integratedTerminal", 
             "justMyCode": false
         },
@@ -36,7 +36,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "Swin2SR/main_test_swin2sr.py",
-            "args": ["--task", "classical_sr", "--scale", "2", "--training_patch_size", "64", "--model_path", "Swin2SR/model_zoo/Swin2SR_ClassicalSR_X2_64.pth", "--folder_lq", "test_images/urban100x2", "--folder_gt", "test_images/urban100"],
+            "args": ["--task", "classical_sr", "--scale", "2", "--training_patch_size", "64", "--model_path", "Swin2SR/model_zoo/Swin2SR_ClassicalSR_X2_64.pth", "--folder_lq", "test_images/urban100x2a", "--folder_gt", "test_images/urban100"],
             "console": "integratedTerminal", 
             "justMyCode": false
         },
