@@ -9,7 +9,7 @@ import requests
 
 from models.network_swin2sr import Swin2SR as net
 from utils import util_calculate_psnr_ssim as util
-
+from time import time
 
 def main():
     parser = argparse.ArgumentParser()
@@ -58,6 +58,7 @@ def main():
     test_results['psnrb_y'] = []
     psnr, ssim, psnr_y, ssim_y, psnrb, psnrb_y = 0, 0, 0, 0, 0, 0
 
+    run_times = []
     for idx, path in enumerate(sorted(glob.glob(os.path.join(folder, '*')))):
         # read image
         imgname, img_lq, img_gt = get_image_pair(args, path)  # image to HWC-BGR, float32
@@ -72,8 +73,13 @@ def main():
             w_pad = (w_old // window_size + 1) * window_size - w_old
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
-            output = test(img_lq, model, args, window_size)
             
+
+            start_time = time()
+            output = test(img_lq, model, args, window_size)
+            end_time = time()
+            run_times.append(end_time - start_time)
+
             if args.task == 'compressed_sr':
                 output = output[0][..., :h_old * args.scale, :w_old * args.scale]
             else:
@@ -129,7 +135,8 @@ def main():
             if args.task in ['color_jpeg_car']:
                 ave_psnrb_y = sum(test_results['psnrb_y']) / len(test_results['psnrb_y'])
                 print('-- Average PSNRB_Y: {:.2f} dB'.format(ave_psnrb_y))
-
+    ave_time = sum(run_times) / len(run_times)
+    print('-- Average Time: {:.2f} seconds'.format(ave_time))
 
 def define_model(args):
     # 001 classical image sr
@@ -245,6 +252,9 @@ def get_image_pair(args, path):
     # 003 real-world image sr (load lq image only)
     elif args.task in ['real_sr', 'lightweight_sr_infer']:
         img_gt = None
+        img_gt = cv2.imread(f'{args.folder_gt}/{imgname}{imgext}', cv2.IMREAD_COLOR).astype(
+            np.float32) / 255.
+
         img_lq = cv2.imread(path, cv2.IMREAD_COLOR).astype(np.float32) / 255.
 
     # 006 grayscale JPEG compression artifact reduction (load gt image and generate lq image on-the-fly)
@@ -271,7 +281,7 @@ def get_image_pair(args, path):
 def test(img_lq, model, args, window_size):
     if args.tile is None:
         # test the image as a whole
-        output = model(img_lq)
+        output = model(img_lq)   
     else:
         # test the image tile by tile
         b, c, h, w = img_lq.size()

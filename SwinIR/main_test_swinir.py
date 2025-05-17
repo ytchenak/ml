@@ -10,7 +10,7 @@ import requests
 from models.network_swinir import SwinIR as net
 from utils import util_calculate_psnr_ssim as util
 
-
+from time import time
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, default='color_dn', help='classical_sr, lightweight_sr, real_sr, '
@@ -23,7 +23,7 @@ def main():
                                        'Images are NOT tested patch by patch.')
     parser.add_argument('--large_model', action='store_true', help='use large model, only provided for real image sr')
     parser.add_argument('--model_path', type=str,
-                        default='model_zoo/swinir/001_classicalSR_DIV2K_s48w8_SwinIR-M_x2.pth')
+                        default='model_zoo/001_classicalSR_DIV2K_s48w8_SwinIR-M_x2.pth')
     parser.add_argument('--folder_lq', type=str, default=None, help='input low-quality test image folder')
     parser.add_argument('--folder_gt', type=str, default=None, help='input ground-truth test image folder')
     parser.add_argument('--tile', type=int, default=None, help='Tile size, None for no tile during testing (testing as a whole)')
@@ -45,6 +45,7 @@ def main():
     model.eval()
     model = model.to(device)
 
+
     # setup folder and path
     folder, save_dir, border, window_size = setup(args)
     os.makedirs(save_dir, exist_ok=True)
@@ -57,6 +58,7 @@ def main():
     test_results['psnrb_y'] = []
     psnr, ssim, psnr_y, ssim_y, psnrb, psnrb_y = 0, 0, 0, 0, 0, 0
 
+    run_times = []
     for idx, path in enumerate(sorted(glob.glob(os.path.join(folder, '*')))):
         # read image
         imgname, img_lq, img_gt = get_image_pair(args, path)  # image to HWC-BGR, float32
@@ -71,7 +73,10 @@ def main():
             w_pad = (w_old // window_size + 1) * window_size - w_old
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
             img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
+            start_time = time()
             output = test(img_lq, model, args, window_size)
+            end_time = time()
+            run_times.append(end_time - start_time)
             output = output[..., :h_old * args.scale, :w_old * args.scale]
 
         # save image
@@ -123,7 +128,8 @@ def main():
             if args.task in ['color_jpeg_car']:
                 ave_psnrb_y = sum(test_results['psnrb_y']) / len(test_results['psnrb_y'])
                 print('-- Average PSNRB_Y: {:.2f} dB'.format(ave_psnrb_y))
-
+    ave_time = sum(run_times) / len(run_times)
+    print('-- Average Time: {:.2f} seconds'.format(ave_time))
 
 def define_model(args):
     # 001 classical image sr
@@ -238,6 +244,10 @@ def get_image_pair(args, path):
     # 003 real-world image sr (load lq image only)
     elif args.task in ['real_sr']:
         img_gt = None
+        img_gt = cv2.imread(f'{args.folder_gt}/{imgname}{imgext}', cv2.IMREAD_COLOR).astype(
+            np.float32) / 255.
+
+
         img_lq = cv2.imread(path, cv2.IMREAD_COLOR).astype(np.float32) / 255.
 
     # 004 grayscale image denoising (load gt image and generate lq image on-the-fly)
