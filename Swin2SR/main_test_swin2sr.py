@@ -45,8 +45,11 @@ def main():
 
     model = define_model(args)
     model.eval()
-    model = model.to('cpu')
+    model = model.to(device) # change to cpu if you want to save onnx model
 
+    # Trying to optimize the model.
+    # model = torch.compile(model) # triton is needed to compile.
+    # torch.set_float32_matmul_precision('high')
     # setup folder and path
     folder, save_dir, border, window_size = setup(args)
     os.makedirs(save_dir, exist_ok=True)
@@ -64,7 +67,7 @@ def main():
         # read image
         imgname, img_lq, img_gt = get_image_pair(args, path)  # image to HWC-BGR, float32
         img_lq = np.transpose(img_lq if img_lq.shape[2] == 1 else img_lq[:, :, [2, 1, 0]], (2, 0, 1))  # HCW-BGR to CHW-RGB
-        img_lq = torch.from_numpy(img_lq).float().unsqueeze(0).to('cpu')  # CHW-RGB to NCHW-RGB
+        img_lq = torch.from_numpy(img_lq).float().unsqueeze(0).to(device)  # CHW-RGB to NCHW-RGB # change to cpu if you want to save onnx model
 
         # inference
         with torch.no_grad():
@@ -282,13 +285,17 @@ def get_image_pair(args, path):
 def test(img_lq, model, args, window_size):
     if args.tile is None:
         # test the image as a whole
-
-        flops, _, parms =  calculate_flops(model=model, 
-                                      input_shape=tuple(img_lq.shape),
-                                      output_as_string=True,
-                                      output_precision=4)
-
         output = model(img_lq)   
+
+        # to get flops and parms
+        # flops, _, parms =  calculate_flops(model=model, 
+        #                               input_shape=tuple(img_lq.shape),
+        #                               output_as_string=True,
+        #                               output_precision=4)
+
+        # save onnx model - you can run one itteration just to get the img dimensions and stop after model is created.
+        # torch.onnx.export(model, img_lq, "swin2sr_classical_x2.onnx", export_params=True, opset_version=12, do_constant_folding=True, verbose=True, input_names = ['input'], output_names = ['output'], dynamic_axes={'input' : {2 : 'h', 3 : 'w'}, 'output' : {2 : 'h', 3 : 'w'}})
+
     else:
         # test the image tile by tile
         b, c, h, w = img_lq.size()

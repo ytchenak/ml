@@ -8,3 +8,4 @@ gittemp
 results
 config.json
 concatenated_results
+*.onnx
