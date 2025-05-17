@@ -286,14 +286,16 @@ def get_image_pair(args, path):
 def test(img_lq, model, args, window_size):
     if args.tile is None:
         # test the image as a whole
-        flops, _, parms =  calculate_flops(model=model, 
-                                      input_shape=tuple(img_lq.shape),
-                                      output_as_string=True,
-                                      output_precision=4)
+        output = model(img_lq)
+
+        # to get flops and parms
+        # flops, _, parms =  calculate_flops(model=model, 
+        #                               input_shape=tuple(img_lq.shape),
+        #                               output_as_string=True,
+        #                               output_precision=4)
         # save onnx model - you can run one itteration just to get the img dimensions and stop after model is created.
         # torch.onnx.export(model, img_lq, "swinir_classical_x2.onnx", export_params=True, opset_version=12, do_constant_folding=True, verbose=True, input_names = ['input'], output_names = ['output'], dynamic_axes={'input' : {2 : 'h', 3 : 'w'}, 'output' : {2 : 'h', 3 : 'w'}})
 
-        output = model(img_lq)
     else:
         # test the image tile by tile
         b, c, h, w = img_lq.size()
