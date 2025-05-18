@@ -1,5 +1,8 @@
 # SwinIR vs Swin2SR
 
+## Results
+- https://docs.google.com/spreadsheets/d/1iyaOiCzeBmkOVr-Gn8sihAnsLSj0NVgrmrjEng4vsM0/edit?gid=0#gid=0
+
 ## Resources
 test images: https://drive.google.com/drive/folders/1EGdMvvT-JjOnQm7SHOuSRXlKf5R-WC2A?usp=sharing
 - Extract to test_images
