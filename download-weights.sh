@@ -1,6 +1,6 @@
 #!/bin/sh
 
-wget -P SwinIr/model_zoo \ 
+wget -P SwinIR/model_zoo \ 
     https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/001_classicalSR_DF2K_s64w8_SwinIR-M_x2.pth \
     https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_PSNR.pth
 
