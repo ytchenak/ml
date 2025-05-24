@@ -45,7 +45,7 @@ def main():
 
     model = define_model(args)
     model.eval()
-    model = model.to(device) # change to cpu if you want to save onnx model
+    model = model.to("cpu") # change to cpu if you want to save onnx model
 
     # Trying to optimize the model.
     # model = torch.compile(model) # triton is needed to compile.
@@ -241,7 +241,7 @@ def get_image_pair(args, path):
             img_lq = cv2.imread(path, cv2.IMREAD_COLOR).astype(np.float32) / 255.            
         else:
             img_gt = cv2.imread(path, cv2.IMREAD_COLOR).astype(np.float32) / 255.
-            img_lq = cv2.imread(f'{args.folder_lq}/{imgname}x{args.scale}{imgext}', cv2.IMREAD_COLOR).astype(
+            img_lq = cv2.imread(f'{args.folder_lq}/{imgname}{imgext}', cv2.IMREAD_COLOR).astype(
                 np.float32) / 255.            
         
     elif args.task in ['compressed_sr']:
@@ -294,7 +294,7 @@ def test(img_lq, model, args, window_size):
         #                               output_precision=4)
 
         # save onnx model - you can run one itteration just to get the img dimensions and stop after model is created.
-        # torch.onnx.export(model, img_lq, "swin2sr_classical_x2.onnx", export_params=True, opset_version=12, do_constant_folding=True, verbose=True, input_names = ['input'], output_names = ['output'], dynamic_axes={'input' : {2 : 'h', 3 : 'w'}, 'output' : {2 : 'h', 3 : 'w'}})
+        torch.onnx.export(model, img_lq, "swin2sr_classical_x2.onnx", export_params=True, opset_version=12, do_constant_folding=True, verbose=True, input_names = ['input'], output_names = ['output'], dynamic_axes={'input' : {2 : 'h', 3 : 'w'}, 'output' : {2 : 'h', 3 : 'w'}})
 
     else:
         # test the image tile by tile
