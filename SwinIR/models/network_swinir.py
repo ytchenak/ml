@@ -213,6 +213,9 @@ class SwinTransformerBlock(nn.Module):
 
         self.register_buffer("attn_mask", attn_mask)
 
+        # Add mask cache
+        self._mask_cache = {}
+
     def calculate_mask(self, x_size):
         # calculate attention mask for SW-MSA
         H, W = x_size
@@ -236,6 +239,20 @@ class SwinTransformerBlock(nn.Module):
 
         return attn_mask
 
+    def get_cached_mask(self, x_size, device):
+        """Get cached attention mask for given size and device"""
+        if self.shift_size == 0:
+            return None
+            
+        cache_key = (*x_size, str(device))
+        if cache_key not in self._mask_cache:
+            self._mask_cache[cache_key] = self.calculate_mask(x_size).to(device)
+        return self._mask_cache[cache_key]
+
+    def clear_cache(self):
+        """Clear the mask cache to free memory"""
+        self._mask_cache.clear()
+
     def forward(self, x, x_size):
         H, W = x_size
         B, L, C = x.shape
@@ -255,11 +272,11 @@ class SwinTransformerBlock(nn.Module):
         x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
-        # W-MSA/SW-MSA (to be compatible for testing on images whose shapes are the multiple of window size
+        # W-MSA/SW-MSA with cached masks
         if self.input_resolution == x_size:
-            attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
+            attn_windows = self.attn(x_windows, mask=self.attn_mask)
         else:
-            attn_windows = self.attn(x_windows, mask=self.calculate_mask(x_size).to(x.device))
+            attn_windows = self.attn(x_windows, mask=self.get_cached_mask(x_size, x.device))
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -363,7 +380,7 @@ class BasicLayer(nn.Module):
         drop_path (float | tuple[float], optional): Stochastic depth rate. Default: 0.0
         norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm
         downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
-        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
     """
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
@@ -657,9 +674,9 @@ class SwinIR(nn.Module):
         self.img_range = img_range
         if in_chans == 3:
             rgb_mean = (0.4488, 0.4371, 0.4040)
-            self.mean = torch.Tensor(rgb_mean).view(1, 3, 1, 1)
+            self.mean = torch.Tensor(rgb_mean).view(1, 3, 1, 1).to("cuda")
         else:
-            self.mean = torch.zeros(1, 1, 1, 1)
+            self.mean = torch.zeros(1, 1, 1, 1).to("cuda")
         self.upscale = upscale
         self.upsampler = upsampler
         self.window_size = window_size
@@ -761,6 +778,10 @@ class SwinIR(nn.Module):
             # for image denoising and JPEG compression artifact reduction
             self.conv_last = nn.Conv2d(embed_dim, num_out_ch, 3, 1, 1)
 
+        # Add caches
+        self._padding_cache = {}
+        self._mean_cache = {}
+
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -780,11 +801,27 @@ class SwinIR(nn.Module):
     def no_weight_decay_keywords(self):
         return {'relative_position_bias_table'}
 
+    def get_cached_padding(self, h, w):
+        """Get cached padding values for given dimensions"""
+        cache_key = (h, w)
+        if cache_key not in self._padding_cache:
+            mod_pad_h = (self.window_size - h % self.window_size) % self.window_size
+            mod_pad_w = (self.window_size - w % self.window_size) % self.window_size
+            self._padding_cache[cache_key] = (mod_pad_h, mod_pad_w)
+        return self._padding_cache[cache_key]
+
+    def get_cached_mean(self, x):
+        """Get cached mean tensor for the input device and dtype"""
+        device_dtype_key = (x.device, x.dtype)
+        if device_dtype_key not in self._mean_cache:
+            self._mean_cache[device_dtype_key] = self.mean.to(device=x.device, dtype=x.dtype)
+        return self._mean_cache[device_dtype_key]
+
     def check_image_size(self, x):
         _, _, h, w = x.size()
-        mod_pad_h = (self.window_size - h % self.window_size) % self.window_size
-        mod_pad_w = (self.window_size - w % self.window_size) % self.window_size
-        x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
+        mod_pad_h, mod_pad_w = self.get_cached_padding(h, w)
+        if mod_pad_h > 0 or mod_pad_w > 0:
+            x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
         return x
 
     def forward_features(self, x):
@@ -806,8 +843,8 @@ class SwinIR(nn.Module):
         H, W = x.shape[2:]
         x = self.check_image_size(x)
         
-        self.mean = self.mean.type_as(x)
-        x = (x - self.mean) * self.img_range
+        cached_mean = self.get_cached_mean(x)
+        x = (x - cached_mean) * self.img_range
 
         if self.upsampler == 'pixelshuffle':
             # for classical SR
@@ -849,6 +886,17 @@ class SwinIR(nn.Module):
         flops += H * W * 3 * self.embed_dim * self.embed_dim
         flops += self.upsample.flops()
         return flops
+
+    def clear_cache(self):
+        """Clear all caches to free memory"""
+        self._padding_cache.clear()
+        self._mean_cache.clear()
+        
+        # Clear mask caches in all transformer blocks
+        for layer in self.layers:
+            for block in layer.residual_group.blocks:
+                if hasattr(block, 'clear_cache'):
+                    block.clear_cache()
 
 
 if __name__ == '__main__':
