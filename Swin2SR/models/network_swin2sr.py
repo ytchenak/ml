@@ -10,6 +10,64 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
+import gc
+import weakref
+from collections import OrderedDict
+from contextlib import contextmanager
+
+
+class LRUCache:
+    """Memory-aware LRU cache with automatic cleanup"""
+    def __init__(self, max_size=10, max_memory_mb=100):
+        self.max_size = max_size
+        self.max_memory_mb = max_memory_mb
+        self.cache = OrderedDict()
+        self._memory_usage = 0
+    
+    def get(self, key):
+        if key in self.cache:
+            # Move to end (most recently used)
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        return None
+    
+    def put(self, key, value):
+        # Calculate memory usage
+        if torch.is_tensor(value):
+            item_memory = value.numel() * value.element_size() / (1024 * 1024)  # MB
+        else:
+            item_memory = 1  # Rough estimate for non-tensors
+        
+        # Remove old items if needed
+        while (len(self.cache) >= self.max_size or 
+               self._memory_usage + item_memory > self.max_memory_mb):
+            if not self.cache:
+                break
+            old_key, old_value = self.cache.popitem(last=False)
+            if torch.is_tensor(old_value):
+                self._memory_usage -= old_value.numel() * old_value.element_size() / (1024 * 1024)
+        
+        self.cache[key] = value
+        self._memory_usage += item_memory
+    
+    def clear(self):
+        self.cache.clear()
+        self._memory_usage = 0
+        gc.collect()  # Force garbage collection
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+@contextmanager
+def inference_mode():
+    """Context manager for inference with automatic cache cleanup"""
+    try:
+        yield
+    finally:
+        # Force cleanup after inference
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 class Mlp(nn.Module):
@@ -132,30 +190,81 @@ class WindowAttention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.softmax = nn.Softmax(dim=-1)
 
+        # Improved caches with memory management
+        self._relative_position_bias_cache = LRUCache(max_size=50, max_memory_mb=500)
+        self._logit_scale_cache = None
+        self._cache_counter = 0
+
+    def get_cached_relative_position_bias(self, device):
+        """Get cached relative position bias with memory management"""
+        device_key = str(device)
+        
+        # Check cache first
+        cached_bias = self._relative_position_bias_cache.get(device_key)
+        if cached_bias is not None:
+            return cached_bias
+        
+        # Compute new bias
+        with torch.no_grad():  # Don't track gradients for cache computation
+            relative_position_bias_table = self.cpb_mlp(self.relative_coords_table).view(-1, self.num_heads)
+            relative_position_bias = relative_position_bias_table[self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)
+            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
+            relative_position_bias = 16 * torch.sigmoid(relative_position_bias)
+            
+            # Cache the result
+            self._relative_position_bias_cache.put(device_key, relative_position_bias.to(device))
+            
+        return self._relative_position_bias_cache.get(device_key)
+
+    def get_cached_logit_scale(self):
+        """Get cached logit scale with periodic refresh"""
+        # Refresh cache periodically to handle parameter updates
+        self._cache_counter += 1
+        if (self._cache_counter % 100 == 0 or 
+            self._logit_scale_cache is None or 
+            self._logit_scale_cache.device != self.logit_scale.device):
+            
+            with torch.no_grad():
+                self._logit_scale_cache = torch.clamp(
+                    self.logit_scale, 
+                    max=torch.log(torch.tensor(1. / 0.01)).to(self.logit_scale.device)
+                ).exp()
+        return self._logit_scale_cache
+
+    def clear_cache(self):
+        """Clear all caches and force cleanup"""
+        self._relative_position_bias_cache.clear()
+        self._logit_scale_cache = None
+        self._cache_counter = 0
+
     def forward(self, x, mask=None):
-        """
-        Args:
-            x: input features with shape of (num_windows*B, N, C)
-            mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
-        """
+        """Forward pass with optimized caching"""
         B_, N, C = x.shape
         qkv_bias = None
         if self.q_bias is not None:
             qkv_bias = torch.cat((self.q_bias, torch.zeros_like(self.v_bias, requires_grad=False), self.v_bias))
         qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
         qkv = qkv.reshape(B_, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
-        # cosine attention
+        # cosine attention with cached logit scale
         attn = (F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1))
-        logit_scale = torch.clamp(self.logit_scale, max=torch.log(torch.tensor(1. / 0.01)).to(self.logit_scale.device)).exp()
+        
+        # Use cached computations only during inference
+        if not self.training:
+            logit_scale = self.get_cached_logit_scale()
+            relative_position_bias = self.get_cached_relative_position_bias(x.device)
+        else:
+            # Compute directly during training to ensure gradients flow properly
+            logit_scale = torch.clamp(self.logit_scale, max=torch.log(torch.tensor(1. / 0.01)).to(self.logit_scale.device)).exp()
+            relative_position_bias_table = self.cpb_mlp(self.relative_coords_table).view(-1, self.num_heads)
+            relative_position_bias = relative_position_bias_table[self.relative_position_index.view(-1)].view(
+                self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)
+            relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
+            relative_position_bias = 16 * torch.sigmoid(relative_position_bias)
+            
         attn = attn * logit_scale
-
-        relative_position_bias_table = self.cpb_mlp(self.relative_coords_table).view(-1, self.num_heads)
-        relative_position_bias = relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww,Wh*Ww,nH
-        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-        relative_position_bias = 16 * torch.sigmoid(relative_position_bias)
         attn = attn + relative_position_bias.unsqueeze(0)
 
         if mask is not None:
@@ -242,6 +351,9 @@ class SwinTransformerBlock(nn.Module):
 
         self.register_buffer("attn_mask", attn_mask)
         
+        # Improved mask cache with memory management
+        self._mask_cache = LRUCache(max_size=200, max_memory_mb=400)
+        
     def calculate_mask(self, x_size):
         # calculate attention mask for SW-MSA
         H, W = x_size
@@ -265,10 +377,34 @@ class SwinTransformerBlock(nn.Module):
 
         return attn_mask        
 
+    def get_cached_mask(self, x_size, device):
+        """Get cached attention mask with memory management"""
+        if self.shift_size == 0:
+            return None
+            
+        cache_key = (*x_size, str(device))
+        
+        # Check cache first
+        cached_mask = self._mask_cache.get(cache_key)
+        if cached_mask is not None:
+            return cached_mask
+        
+        # Compute and cache new mask
+        with torch.no_grad():
+            mask = self.calculate_mask(x_size).to(device)
+            self._mask_cache.put(cache_key, mask)
+            
+        return self._mask_cache.get(cache_key)
+
+    def clear_cache(self):
+        """Clear all caches and force cleanup"""
+        self._mask_cache.clear()
+        if hasattr(self.attn, 'clear_cache'):
+            self.attn.clear_cache()
+
     def forward(self, x, x_size):
         H, W = x_size
         B, L, C = x.shape
-        #assert L == H * W, "input feature has wrong size"
 
         shortcut = x
         x = x.view(B, H, W, C)
@@ -283,11 +419,16 @@ class SwinTransformerBlock(nn.Module):
         x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
-        # W-MSA/SW-MSA (to be compatible for testing on images whose shapes are the multiple of window size
+        # W-MSA/SW-MSA with improved caching
         if self.input_resolution == x_size:
             attn_windows = self.attn(x_windows, mask=self.attn_mask)  # nW*B, window_size*window_size, C
         else:
-            attn_windows = self.attn(x_windows, mask=self.calculate_mask(x_size).to(x.device))
+            # Use cached mask only during inference
+            if not self.training:
+                mask = self.get_cached_mask(x_size, x.device)
+            else:
+                mask = self.calculate_mask(x_size).to(x.device)
+            attn_windows = self.attn(x_windows, mask=mask)
             
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -848,7 +989,7 @@ class Swin2SR(nn.Module):
             self.conv_last_hf = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
             
         elif self.upsampler == 'pixelshuffledirect':
-            # for lightweight SR (to save parameters)
+            # for lightweight SR
             self.upsample = UpsampleOneStep(upscale, embed_dim, num_out_ch,
                                             (patches_resolution[0], patches_resolution[1]))
         elif self.upsampler == 'nearest+conv':
@@ -864,6 +1005,11 @@ class Swin2SR(nn.Module):
         else:
             # for image denoising and JPEG compression artifact reduction
             self.conv_last = nn.Conv2d(embed_dim, num_out_ch, 3, 1, 1)
+
+        # Improved caches with better memory management
+        self._padding_cache = LRUCache(max_size=500, max_memory_mb=100)
+        self._mean_cache = LRUCache(max_size=100, max_memory_mb=100)
+        self._inference_count = 0
 
         self.apply(self._init_weights)
 
@@ -884,11 +1030,40 @@ class Swin2SR(nn.Module):
     def no_weight_decay_keywords(self):
         return {'relative_position_bias_table'}
 
-    def check_image_size(self, x):
-        _, _, h, w = x.size()
+    def get_cached_padding(self, h, w):
+        """Get cached padding values with memory management"""
+        cache_key = (h, w)
+        
+        cached_padding = self._padding_cache.get(cache_key)
+        if cached_padding is not None:
+            return cached_padding
+            
+        # Compute and cache padding
         mod_pad_h = (self.window_size - h % self.window_size) % self.window_size
         mod_pad_w = (self.window_size - w % self.window_size) % self.window_size
-        x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
+        self._padding_cache.put(cache_key, (mod_pad_h, mod_pad_w))
+        
+        return self._padding_cache.get(cache_key)
+
+    def get_cached_mean(self, x):
+        """Get cached mean tensor with memory management"""
+        device_dtype_key = (x.device, x.dtype)
+        
+        cached_mean = self._mean_cache.get(device_dtype_key)
+        if cached_mean is not None:
+            return cached_mean
+            
+        # Compute and cache mean
+        mean_tensor = self.mean.to(device=x.device, dtype=x.dtype)
+        self._mean_cache.put(device_dtype_key, mean_tensor)
+        
+        return self._mean_cache.get(device_dtype_key)
+
+    def check_image_size(self, x):
+        _, _, h, w = x.size()
+        mod_pad_h, mod_pad_w = self.get_cached_padding(h, w)
+        if mod_pad_h > 0 or mod_pad_w > 0:
+            x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
         return x
 
     def forward_features(self, x):
@@ -922,11 +1097,16 @@ class Swin2SR(nn.Module):
         return x    
 
     def forward(self, x):
+        # Automatic cache cleanup every N inferences
+        self._inference_count += 1
+        if self._inference_count % 20 == 0:  # Clean every 20 inferences
+            self.clear_cache()
+            
         H, W = x.shape[2:]
         x = self.check_image_size(x)
 
-        self.mean = self.mean.type_as(x)
-        x = (x - self.mean) * self.img_range
+        cached_mean = self.get_cached_mean(x)
+        x = (x - cached_mean) * self.img_range
 
         if self.upsampler == 'pixelshuffle':
             # for classical SR
@@ -944,7 +1124,7 @@ class Swin2SR(nn.Module):
             x = self.conv_after_aux(aux)
             x = self.upsample(x)[:, :, :H * self.upscale, :W * self.upscale] + bicubic[:, :, :H * self.upscale, :W * self.upscale]
             x = self.conv_last(x)
-            aux = aux / self.img_range + self.mean
+            aux = aux / self.img_range + cached_mean
         elif self.upsampler == 'pixelshuffle_hf':
             # for classical SR with HF
             x = self.conv_first(x)
@@ -957,7 +1137,7 @@ class Swin2SR(nn.Module):
             x_hf = self.conv_before_upsample_hf(x_hf)
             x_hf = self.conv_last_hf(self.upsample_hf(x_hf))
             x = x_out + x_hf
-            x_hf = x_hf / self.img_range + self.mean
+            x_hf = x_hf / self.img_range + cached_mean
 
         elif self.upsampler == 'pixelshuffledirect':
             # for lightweight SR
@@ -978,12 +1158,12 @@ class Swin2SR(nn.Module):
             res = self.conv_after_body(self.forward_features(x_first)) + x_first
             x = x + self.conv_last(res)
         
-        x = x / self.img_range + self.mean
+        x = x / self.img_range + cached_mean
         if self.upsampler == "pixelshuffle_aux":
             return x[:, :, :H*self.upscale, :W*self.upscale], aux
         
         elif self.upsampler == "pixelshuffle_hf":
-            x_out = x_out / self.img_range + self.mean
+            x_out = x_out / self.img_range + cached_mean
             return x_out[:, :, :H*self.upscale, :W*self.upscale], x[:, :, :H*self.upscale, :W*self.upscale], x_hf[:, :, :H*self.upscale, :W*self.upscale]
         
         else:
@@ -1000,6 +1180,59 @@ class Swin2SR(nn.Module):
         flops += self.upsample.flops()
         return flops
 
+    def clear_cache(self):
+        """Comprehensive cache cleanup with memory management"""
+        # Clear main caches
+        self._padding_cache.clear()
+        self._mean_cache.clear()
+        
+        # Clear caches in all layers
+        for layer in self.layers:
+            for block in layer.residual_group.blocks:
+                if hasattr(block, 'clear_cache'):
+                    block.clear_cache()
+        
+        # Clear caches in HF layers if they exist
+        if hasattr(self, 'layers_hf'):
+            for layer in self.layers_hf:
+                for block in layer.residual_group.blocks:
+                    if hasattr(block, 'clear_cache'):
+                        block.clear_cache()
+        
+        # Force garbage collection
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def force_cleanup(self):
+        """Aggressive cleanup for memory pressure situations"""
+        self.clear_cache()
+        
+        # Reset inference counter
+        self._inference_count = 0
+        
+        # Additional PyTorch cleanup
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+    @contextmanager
+    def inference_context(self):
+        """Context manager for efficient inference with automatic cleanup"""
+        try:
+            # Set to eval mode for inference
+            was_training = self.training
+            self.eval()
+            yield self
+        finally:
+            # Restore training mode
+            if was_training:
+                self.train()
+            # Cleanup after inference batch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
 
 if __name__ == '__main__':
     upscale = 4
@@ -1015,3 +1248,44 @@ if __name__ == '__main__':
     x = torch.randn((1, 3, height, width))
     x = model(x)
     print(x.shape)
+    
+    # Example usage with improved caching:
+    print("\n=== Cache Management Examples ===")
+    
+    # Method 1: Using context manager (Recommended)
+    print("1. Using inference context manager:")
+    with model.inference_context():
+        for i in range(5):
+            x = torch.randn((1, 3, height, width))
+            output = model(x)
+            print(f"   Inference {i+1} completed, output shape: {output.shape}")
+    
+    # Method 2: Manual cache management
+    print("\n2. Manual cache management:")
+    model.eval()  # Set to inference mode
+    for i in range(5):
+        x = torch.randn((1, 3, height, width))
+        output = model(x)
+        print(f"   Inference {i+1} completed")
+        
+        # Clear cache every few inferences to prevent memory buildup
+        if (i + 1) % 3 == 0:
+            model.clear_cache()
+            print(f"   Cache cleared after inference {i+1}")
+    
+    # Method 3: Using the global inference_mode context
+    print("\n3. Using global inference mode:")
+    with inference_mode():
+        model.eval()
+        for i in range(3):
+            x = torch.randn((1, 3, height, width))
+            output = model(x)
+            print(f"   Inference {i+1} completed")
+    
+    # Force cleanup when done
+    model.force_cleanup()
+    print("\nForced cleanup completed - all caches cleared and memory freed")
+    
+    # Memory monitoring example
+    if torch.cuda.is_available():
+        print(f"\nGPU memory after cleanup: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
