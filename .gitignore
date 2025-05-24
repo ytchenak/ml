@@ -1,0 +1,11 @@
+.venv
+
+test_images
+gittemp
+
+*.pth
+**/__pycache__
+results
+config.json
+concatenated_results
+*.onnx
